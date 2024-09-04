@@ -28,7 +28,7 @@
 
 #define DFU_DNLOAD (1)
 #define AES_CMD_DEC (1U)
-#define APPLE_VID (0x5AC)
+#define APPLE_VID (0x05AC)
 #define AES_CMD_CBC (16U)
 #define AES_BLOCK_SZ (16)
 #define DFU_STATUS_OK (0)
