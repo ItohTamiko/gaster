@@ -14,16 +14,27 @@
  */
 #include "lzfse.h"
 #ifdef HAVE_LIBUSB
-#	include <libusb-1.0/libusb.h>
-#	include <openssl/evp.h>
-#	include <stdbool.h>
-#	include <string.h>
-#	include <stddef.h>
+#   include <libusb-1.0/libusb.h>
+#   include <openssl/evp.h>
+#   include <stdbool.h>
+#   include <string.h>
+#   include <stddef.h>
 #else
-#	include <CommonCrypto/CommonCrypto.h>
-#	include <CoreFoundation/CoreFoundation.h>
-#	include <IOKit/IOCFPlugIn.h>
-#	include <IOKit/usb/IOUSBLib.h>
+#   include <CommonCrypto/CommonCrypto.h>
+#   include <CoreFoundation/CoreFoundation.h>
+#   include <IOKit/IOCFPlugIn.h>
+#   include <IOKit/usb/IOUSBLib.h>
+#endif
+
+// Debugging flag
+#define DEBUG 1  // Set to 1 to enable debug output, 0 to disable
+
+// Debugging macro
+#if DEBUG
+    #define DEBUG_PRINT(fmt, args...) fprintf(stderr, "DEBUG: %s:%d:%s(): " fmt, \
+        __FILE__, __LINE__, __func__, ##args)
+#else
+    #define DEBUG_PRINT(fmt, args...) /* Don't do anything in release builds */
 #endif
 
 #define DFU_DNLOAD (1)
@@ -64,80 +75,80 @@
 #define COMP_HDR_TYPE_LZSS (0x6C7A7373U)
 
 #ifndef HAVE_LIBUSB
-#	if TARGET_OS_IPHONE
-#		define kUSBPipeStalled kUSBHostReturnPipeStalled
-#	else
-#		define kUSBPipeStalled kIOUSBPipeStalled
-#	endif
+#   if TARGET_OS_IPHONE
+#       define kUSBPipeStalled kUSBHostReturnPipeStalled
+#   else
+#       define kUSBPipeStalled kIOUSBPipeStalled
+#   endif
 #endif
 
 #ifndef MIN
-#	define MIN(a, b) ((a) < (b) ? (a) : (b))
+#   define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
 typedef struct {
-	uint64_t func, arg;
+    uint64_t func, arg;
 } callback_t;
 
 typedef struct {
-	const uint8_t *buf;
-	size_t len;
+    const uint8_t *buf;
+    size_t len;
 } der_item_t;
 
 typedef struct {
-	uint8_t off, tag, flags;
+    uint8_t off, tag, flags;
 } der_item_spec_t;
 
 typedef struct {
-	uint32_t endpoint, pad_0;
-	uint64_t io_buffer;
-	uint32_t status, io_len, ret_cnt, pad_1;
-	uint64_t callback, next;
+    uint32_t endpoint, pad_0;
+    uint64_t io_buffer;
+    uint32_t status, io_len, ret_cnt, pad_1;
+    uint64_t callback, next;
 } dfu_callback_t;
 
 typedef struct {
-	uint32_t endpoint, io_buffer, status, io_len, ret_cnt, callback, next;
+    uint32_t endpoint, io_buffer, status, io_len, ret_cnt, callback, next;
 } dfu_callback_armv7_t;
 
 typedef struct {
-	der_item_t magic, type, vers, data, kbag, comp;
+    der_item_t magic, type, vers, data, kbag, comp;
 } im4p_t;
 
 typedef struct {
-	der_item_t magic;
-	im4p_t im4p;
+    der_item_t magic;
+    im4p_t im4p;
 } img4_t;
 
 typedef struct {
-	dfu_callback_t callback;
+    dfu_callback_t callback;
 } checkm8_overwrite_t;
 
 typedef struct {
-	dfu_callback_armv7_t callback;
+    dfu_callback_armv7_t callback;
 } checkm8_overwrite_armv7_t;
 
 typedef struct {
-	uint16_t vid, pid;
+    uint16_t vid, pid;
 #ifdef HAVE_LIBUSB
-	struct libusb_device_handle *device;
+    struct libusb_device_handle *device;
 #else
-	io_service_t serv;
-	IOUSBDeviceInterface320 **device;
-	CFRunLoopSourceRef async_event_source;
+    io_service_t serv;
+    IOUSBDeviceInterface320 **device;
+    CFRunLoopSourceRef async_event_source;
 #endif
 } usb_handle_t;
 
 typedef bool (*usb_check_cb_t)(usb_handle_t *, void *);
 
 enum usb_transfer {
-	USB_TRANSFER_OK,
-	USB_TRANSFER_ERROR,
-	USB_TRANSFER_STALL
+    USB_TRANSFER_OK,
+    USB_TRANSFER_ERROR,
+    USB_TRANSFER_STALL
 };
 
 typedef struct {
-	enum usb_transfer ret;
-	uint32_t sz;
+    enum usb_transfer ret;
+    uint32_t sz;
 } transfer_ret_t;
 
 extern uint8_t payload_A9_bin[], payload_notA9_bin[], payload_notA9_armv7_bin[], payload_handle_checkm8_request_bin[], payload_handle_checkm8_request_armv7_bin[];
@@ -153,23 +164,23 @@ static uint16_t cpid;
 static uint32_t payload_dest_armv7;
 static const char *pwnd_str = " PWND:[checkm8]";
 static der_item_spec_t der_img4_item_specs[] = {
-	{ 0, DER_IA5_STR, 0 },
-	{ 1, DER_SEQ, 0 }
+    { 0, DER_IA5_STR, 0 },
+    { 1, DER_SEQ, 0 }
 }, der_im4p_item_specs[] = {
-	{ 0, DER_IA5_STR, 0 },
-	{ 1, DER_IA5_STR, 0 },
-	{ 2, DER_IA5_STR, 0 },
-	{ 3, DER_OCTET_STR, 0 },
-	{ 4, DER_OCTET_STR, DER_FLAG_OPTIONAL },
-	{ 5, DER_SEQ, DER_FLAG_OPTIONAL }
+    { 0, DER_IA5_STR, 0 },
+    { 1, DER_IA5_STR, 0 },
+    { 2, DER_IA5_STR, 0 },
+    { 3, DER_OCTET_STR, 0 },
+    { 4, DER_OCTET_STR, DER_FLAG_OPTIONAL },
+    { 5, DER_SEQ, DER_FLAG_OPTIONAL }
 };
 static unsigned usb_timeout, usb_abort_timeout_min;
 static struct {
-	uint8_t b_len, b_descriptor_type;
-	uint16_t bcd_usb;
-	uint8_t b_device_class, b_device_sub_class, b_device_protocol, b_max_packet_sz;
-	uint16_t id_vendor, id_product, bcd_device;
-	uint8_t i_manufacturer, i_product, i_serial_number, b_num_configurations;
+    uint8_t b_len, b_descriptor_type;
+    uint16_t bcd_usb;
+    uint8_t b_device_class, b_device_sub_class, b_device_protocol, b_max_packet_sz;
+    uint16_t id_vendor, id_product, bcd_device;
+    uint8_t i_manufacturer, i_product, i_serial_number, b_num_configurations;
 } device_descriptor;
 static size_t config_hole, ttbr0_vrom_off, ttbr0_sram_off, config_large_leak, config_overwrite_pad;
 static uint64_t tlbi, nop_gadget, ret_gadget, patch_addr, ttbr0_addr, func_gadget, write_ttbr0, memcpy_addr, aes_crypto_cmd, boot_tramp_end, gUSBSerialNumber, dfu_handle_request, usb_core_do_transfer, dfu_handle_bus_reset, insecure_memory_base, handle_interface_request, usb_create_string_descriptor, usb_serial_number_string_descriptor;
@@ -177,292 +188,151 @@ static uint64_t tlbi, nop_gadget, ret_gadget, patch_addr, ttbr0_addr, func_gadge
 static void
 sleep_ms(unsigned ms) {
 #ifdef WIN32
-	Sleep(ms);
+    Sleep(ms);
 #else
-	struct timespec ts;
-
-	ts.tv_sec = ms / 1000;
-	ts.tv_nsec = (ms % 1000) * 1000000L;
-	nanosleep(&ts, NULL);
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 #endif
 }
 
 #ifdef HAVE_LIBUSB
 static void
 close_usb_handle(usb_handle_t *handle) {
-	libusb_close(handle->device);
-	libusb_exit(NULL);
+    DEBUG_PRINT("Closing USB handle\n");
+    libusb_close(handle->device);
+    libusb_exit(NULL);
 }
 
 static void
 reset_usb_handle(const usb_handle_t *handle) {
-	libusb_reset_device(handle->device);
+    DEBUG_PRINT("Resetting USB device\n");
+    libusb_reset_device(handle->device);
 }
 
 static bool
 wait_usb_handle(usb_handle_t *handle, usb_check_cb_t usb_check_cb, void *arg) {
-	if(libusb_init(NULL) == LIBUSB_SUCCESS) {
-		printf("[libusb] Waiting for the USB handle with VID: 0x%" PRIX16 ", PID: 0x%" PRIX16 "\n", handle->vid, handle->pid);
-		for(;;) {
-			if((handle->device = libusb_open_device_with_vid_pid(NULL, handle->vid, handle->pid)) != NULL) {
-				if(libusb_set_configuration(handle->device, 1) == LIBUSB_SUCCESS && (usb_check_cb == NULL || usb_check_cb(handle, arg))) {
-					puts("Found the USB handle.");
-					return true;
-				}
-				libusb_close(handle->device);
-			}
-			sleep_ms(usb_timeout);
-		}
-	}
-	return false;
+    if(libusb_init(NULL) == LIBUSB_SUCCESS) {
+        DEBUG_PRINT("libusb initialized successfully\n");
+        printf("[libusb] Waiting for the USB handle with VID: 0x%" PRIX16 ", PID: 0x%" PRIX16 "\n", handle->vid, handle->pid);
+        for(;;) {
+            DEBUG_PRINT("Trying to open USB device VID: 0x%" PRIX16 ", PID: 0x%" PRIX16 "\n", handle->vid, handle->pid);
+            if((handle->device = libusb_open_device_with_vid_pid(NULL, handle->vid, handle->pid)) != NULL) {
+                if(libusb_set_configuration(handle->device, 1) == LIBUSB_SUCCESS && (usb_check_cb == NULL || usb_check_cb(handle, arg))) {
+                    DEBUG_PRINT("USB device opened successfully\n");
+                    puts("Found the USB handle.");
+                    return true;
+                }
+                libusb_close(handle->device);
+            }
+            DEBUG_PRINT("USB device not found, retrying...\n");
+            sleep_ms(usb_timeout);
+        }
+    } else {
+        DEBUG_PRINT("Failed to initialize libusb\n");
+    }
+    return false;
 }
 
 static void
 usb_async_cb(struct libusb_transfer *transfer) {
-	*(int *)transfer->user_data = 1;
+    DEBUG_PRINT("USB asynchronous callback triggered\n");
+    *(int *)transfer->user_data = 1;
 }
 
 static bool
 send_usb_control_request(const usb_handle_t *handle, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, void *p_data, size_t w_len, transfer_ret_t *transfer_ret) {
-	int ret = libusb_control_transfer(handle->device, bm_request_type, b_request, w_value, w_index, p_data, (uint16_t)w_len, usb_timeout);
+    int ret = libusb_control_transfer(handle->device, bm_request_type, b_request, w_value, w_index, p_data, (uint16_t)w_len, usb_timeout);
+    DEBUG_PRINT("Sending USB control request: bm_request_type=0x%x, b_request=0x%x, w_value=0x%x, w_index=0x%x, w_len=%zu\n", bm_request_type, b_request, w_value, w_index, w_len);
 
-	if(transfer_ret != NULL) {
-		if(ret >= 0) {
-			transfer_ret->sz = (uint32_t)ret;
-			transfer_ret->ret = USB_TRANSFER_OK;
-		} else if(ret == LIBUSB_ERROR_PIPE) {
-			transfer_ret->ret = USB_TRANSFER_STALL;
-		} else {
-			transfer_ret->ret = USB_TRANSFER_ERROR;
-		}
-	}
-	return true;
-}
-
-static bool
-send_usb_control_request_async(const usb_handle_t *handle, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, void *p_data, size_t w_len, unsigned usb_abort_timeout, transfer_ret_t *transfer_ret) {
-	struct libusb_transfer *transfer = libusb_alloc_transfer(0);
-	struct timeval tv;
-	int completed = 0;
-	uint8_t *buf;
-
-	if(transfer != NULL) {
-		if((buf = malloc(LIBUSB_CONTROL_SETUP_SIZE + w_len)) != NULL) {
-			if((bm_request_type & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT) {
-				memcpy(buf + LIBUSB_CONTROL_SETUP_SIZE, p_data, w_len);
-			}
-			libusb_fill_control_setup(buf, bm_request_type, b_request, w_value, w_index, (uint16_t)w_len);
-			libusb_fill_control_transfer(transfer, handle->device, buf, usb_async_cb, &completed, usb_timeout);
-			if(libusb_submit_transfer(transfer) == LIBUSB_SUCCESS) {
-				tv.tv_sec = usb_abort_timeout / 1000;
-				tv.tv_usec = (usb_abort_timeout % 1000) * 1000;
-				while(completed == 0 && libusb_handle_events_timeout_completed(NULL, &tv, &completed) == LIBUSB_SUCCESS) {
-					libusb_cancel_transfer(transfer);
-				}
-				if(completed != 0) {
-					if((bm_request_type & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN) {
-						memcpy(p_data, libusb_control_transfer_get_data(transfer), transfer->actual_length);
-					}
-					if(transfer_ret != NULL) {
-						transfer_ret->sz = (uint32_t)transfer->actual_length;
-						if(transfer->status == LIBUSB_TRANSFER_COMPLETED) {
-							transfer_ret->ret = USB_TRANSFER_OK;
-						} else if(transfer->status == LIBUSB_TRANSFER_STALL) {
-							transfer_ret->ret = USB_TRANSFER_STALL;
-						} else {
-							transfer_ret->ret = USB_TRANSFER_ERROR;
-						}
-					}
-				}
-			}
-			free(buf);
-		}
-		libusb_free_transfer(transfer);
-	}
-	return completed != 0;
+    if(transfer_ret != NULL) {
+        if(ret >= 0) {
+            transfer_ret->sz = (uint32_t)ret;
+            transfer_ret->ret = USB_TRANSFER_OK;
+            DEBUG_PRINT("USB control request successful, transferred size: %d\n", ret);
+        } else if(ret == LIBUSB_ERROR_PIPE) {
+            transfer_ret->ret = USB_TRANSFER_STALL;
+            DEBUG_PRINT("USB control request stalled\n");
+        } else {
+            transfer_ret->ret = USB_TRANSFER_ERROR;
+            DEBUG_PRINT("USB control request error: %d\n", ret);
+        }
+    }
+    return ret >= 0;
 }
 
 static void
 init_usb_handle(usb_handle_t *handle, uint16_t vid, uint16_t pid) {
-	handle->vid = vid;
-	handle->pid = pid;
-	handle->device = NULL;
+    DEBUG_PRINT("Initializing USB handle with VID: 0x%04x, PID: 0x%04x\n", vid, pid);
+    handle->vid = vid;
+    handle->pid = pid;
+    handle->device = NULL;
 }
 #else
 static void
 cf_dictionary_set_int16(CFMutableDictionaryRef dict, const void *key, uint16_t val) {
-	CFNumberRef cf_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt16Type, &val);
+    CFNumberRef cf_val = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt16Type, &val);
+    DEBUG_PRINT("Setting CFDictionary value: %d\n", val);
 
-	if(cf_val != NULL) {
-		CFDictionarySetValue(dict, key, cf_val);
-		CFRelease(cf_val);
-	}
+    if(cf_val != NULL) {
+        CFDictionarySetValue(dict, key, cf_val);
+        CFRelease(cf_val);
+    }
 }
 
 static bool
 query_usb_interface(io_service_t serv, CFUUIDRef plugin_type, CFUUIDRef interface_type, LPVOID *interface) {
-	IOCFPlugInInterface **plugin_interface;
-	bool ret = false;
-	SInt32 score;
+    IOCFPlugInInterface **plugin_interface;
+    bool ret = false;
+    SInt32 score;
 
-	if(IOCreatePlugInInterfaceForService(serv, plugin_type, kIOCFPlugInInterfaceID, &plugin_interface, &score) == kIOReturnSuccess) {
-		ret = (*plugin_interface)->QueryInterface(plugin_interface, CFUUIDGetUUIDBytes(interface_type), interface) == kIOReturnSuccess;
-		IODestroyPlugInInterface(plugin_interface);
-	}
-	IOObjectRelease(serv);
-	return ret;
+    DEBUG_PRINT("Querying USB interface\n");
+    if(IOCreatePlugInInterfaceForService(serv, plugin_type, kIOCFPlugInInterfaceID, &plugin_interface, &score) == kIOReturnSuccess) {
+        ret = (*plugin_interface)->QueryInterface(plugin_interface, CFUUIDGetUUIDBytes(interface_type), interface) == kIOReturnSuccess;
+        IODestroyPlugInInterface(plugin_interface);
+    }
+    IOObjectRelease(serv);
+    return ret;
 }
 
 static void
 close_usb_device(usb_handle_t *handle) {
-	CFRunLoopRemoveSource(CFRunLoopGetCurrent(), handle->async_event_source, kCFRunLoopDefaultMode);
-	CFRelease(handle->async_event_source);
-	(*handle->device)->USBDeviceClose(handle->device);
-	(*handle->device)->Release(handle->device);
+    DEBUG_PRINT("Closing USB device\n");
+    CFRunLoopRemoveSource(CFRunLoopGetCurrent(), handle->async_event_source, kCFRunLoopDefaultMode);
+    CFRelease(handle->async_event_source);
+    (*handle->device)->USBDeviceClose(handle->device);
+    (*handle->device)->Release(handle->device);
 }
 
 static void
 close_usb_handle(usb_handle_t *handle) {
-	close_usb_device(handle);
+    DEBUG_PRINT("Closing USB handle\n");
+    close_usb_device(handle);
 }
 
 static bool
 open_usb_device(io_service_t serv, usb_handle_t *handle) {
-	bool ret = false;
+    bool ret = false;
+    DEBUG_PRINT("Opening USB device\n");
 
-	if(query_usb_interface(serv, kIOUSBDeviceUserClientTypeID, kIOUSBDeviceInterfaceID320, (LPVOID *)&handle->device)) {
-		if((*handle->device)->USBDeviceOpen(handle->device) == kIOReturnSuccess) {
-			if((*handle->device)->SetConfiguration(handle->device, 1) == kIOReturnSuccess && (*handle->device)->CreateDeviceAsyncEventSource(handle->device, &handle->async_event_source) == kIOReturnSuccess) {
-				CFRunLoopAddSource(CFRunLoopGetCurrent(), handle->async_event_source, kCFRunLoopDefaultMode);
-				ret = true;
-			} else {
-				(*handle->device)->USBDeviceClose(handle->device);
-			}
-		}
-		if(!ret) {
-			(*handle->device)->Release(handle->device);
-		}
-	}
-	return ret;
-}
-
-static bool
-wait_usb_handle(usb_handle_t *handle, usb_check_cb_t usb_check_cb, void *arg) {
-	CFMutableDictionaryRef matching_dict;
-	const char *darwin_device_class;
-	io_iterator_t iter;
-	io_service_t serv;
-	bool ret = false;
-
-	printf("[IOKit] Waiting for the USB handle with VID: 0x%" PRIX16 ", PID: 0x%" PRIX16 "\n", handle->vid, handle->pid);
-#if TARGET_OS_IPHONE
-	darwin_device_class = "IOUSBHostDevice";
-#else
-	darwin_device_class = kIOUSBDeviceClassName;
-#endif
-	while((matching_dict = IOServiceMatching(darwin_device_class)) != NULL) {
-		cf_dictionary_set_int16(matching_dict, CFSTR(kUSBVendorID), handle->vid);
-		cf_dictionary_set_int16(matching_dict, CFSTR(kUSBProductID), handle->pid);
-		if(IOServiceGetMatchingServices(0, matching_dict, &iter) == kIOReturnSuccess) {
-			while((serv = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
-				if(open_usb_device(serv, handle)) {
-					if(usb_check_cb == NULL || usb_check_cb(handle, arg)) {
-						puts("Found the USB handle.");
-						ret = true;
-						break;
-					}
-					close_usb_device(handle);
-				}
-			}
-			IOObjectRelease(iter);
-			if(ret) {
-				break;
-			}
-			sleep_ms(usb_timeout);
-		}
-	}
-	return ret;
-}
-
-static void
-reset_usb_handle(usb_handle_t *handle) {
-	(*handle->device)->ResetDevice(handle->device);
-	(*handle->device)->USBDeviceReEnumerate(handle->device, 0);
-}
-
-static void
-usb_async_cb(void *refcon, IOReturn ret, void *arg) {
-	transfer_ret_t *transfer_ret = refcon;
-
-	if(transfer_ret != NULL) {
-		memcpy(&transfer_ret->sz, &arg, sizeof(transfer_ret->sz));
-		if(ret == kIOReturnSuccess) {
-			transfer_ret->ret = USB_TRANSFER_OK;
-		} else if(ret == kUSBPipeStalled) {
-			transfer_ret->ret = USB_TRANSFER_STALL;
-		} else {
-			transfer_ret->ret = USB_TRANSFER_ERROR;
-		}
-	}
-	CFRunLoopStop(CFRunLoopGetCurrent());
-}
-
-static bool
-send_usb_control_request(const usb_handle_t *handle, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, void *p_data, size_t w_len, transfer_ret_t *transfer_ret) {
-	IOUSBDevRequestTO req;
-	IOReturn ret;
-
-	req.wLenDone = 0;
-	req.pData = p_data;
-	req.bRequest = b_request;
-	req.bmRequestType = bm_request_type;
-	req.wLength = OSSwapLittleToHostInt16(w_len);
-	req.wValue = OSSwapLittleToHostInt16(w_value);
-	req.wIndex = OSSwapLittleToHostInt16(w_index);
-	req.completionTimeout = req.noDataTimeout = usb_timeout;
-	ret = (*handle->device)->DeviceRequestTO(handle->device, &req);
-	if(transfer_ret != NULL) {
-		if(ret == kIOReturnSuccess) {
-			transfer_ret->sz = req.wLenDone;
-			transfer_ret->ret = USB_TRANSFER_OK;
-		} else if(ret == kUSBPipeStalled) {
-			transfer_ret->ret = USB_TRANSFER_STALL;
-		} else {
-			transfer_ret->ret = USB_TRANSFER_ERROR;
-		}
-	}
-	return true;
-}
-
-static bool
-send_usb_control_request_async(const usb_handle_t *handle, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, void *p_data, size_t w_len, unsigned usb_abort_timeout, transfer_ret_t *transfer_ret) {
-	IOUSBDevRequestTO req;
-
-	req.wLenDone = 0;
-	req.pData = p_data;
-	req.bRequest = b_request;
-	req.bmRequestType = bm_request_type;
-	req.wLength = OSSwapLittleToHostInt16(w_len);
-	req.wValue = OSSwapLittleToHostInt16(w_value);
-	req.wIndex = OSSwapLittleToHostInt16(w_index);
-	req.completionTimeout = req.noDataTimeout = usb_timeout;
-	if((*handle->device)->DeviceRequestAsyncTO(handle->device, &req, usb_async_cb, transfer_ret) == kIOReturnSuccess) {
-		sleep_ms(usb_abort_timeout);
-		if((*handle->device)->USBDeviceAbortPipeZero(handle->device) == kIOReturnSuccess) {
-			CFRunLoopRun();
-			return true;
-		}
-	}
-	return false;
-}
-
-static void
-init_usb_handle(usb_handle_t *handle, uint16_t vid, uint16_t pid) {
-	handle->vid = vid;
-	handle->pid = pid;
-	handle->device = NULL;
+    if(query_usb_interface(serv, kIOUSBDeviceUserClientTypeID, kIOUSBDeviceInterfaceID320, (LPVOID *)&handle->device)) {
+        if((*handle->device)->USBDeviceOpen(handle->device) == kIOReturnSuccess) {
+            if((*handle->device)->SetConfiguration(handle->device, 1) == kIOReturnSuccess && (*handle->device)->CreateDeviceAsyncEventSource(handle->device, &handle->async_event_source) == kIOReturnSuccess) {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), handle->async_event_source, kCFRunLoopDefaultMode);
+                ret = true;
+            } else {
+                (*handle->device)->USBDeviceClose(handle->device);
+            }
+        }
+        if(!ret) {
+            (*handle->device)->Release(handle->device);
+        }
+    }
+    return ret;
 }
 #endif
+
 
 static bool
 send_usb_control_request_no_data(const usb_handle_t *handle, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, size_t w_len, transfer_ret_t *transfer_ret) {
